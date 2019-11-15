@@ -1,0 +1,916 @@
+---
+title: "Machine_Learning_2_Assignment1"
+author: "Juan Martin D'Alessandro &  J. Ramon Estevez"
+date: "9/22/2019"
+output: html_document
+---
+
+# 0. Introduction
+
+The objective of this analysis is to reduce the number and duration of the absences of the company employees. To achieve that, we will work with a dataset created by the HR department with all the recent absences together with its duration and a set of features that they consider important. They have collected 593 observations on a period of xx time. 
+
+The steps followed are:
+- Identify the most important features and their relation/impact with long absences. During this stage, we cleaned the dataset, do some plots to better understand the data and get insights to finally perform some features engineering and features selection.
+- Provide a Machine Learning model to identify beforehand absences that might be prolonged more than 5 hours. This is a Classification Problem and we will optimize our model for Accuracy. Considering the aplication of the model we decided this is a good evaluation variable over Precision or Recall.
+
+This is an iterative process, every time we do some Feature engineering and we run the model again and so on until we find the most accurate model. On the script, you will see different transformations that have been done to the dataset (bucketizing, grouping obs with low freq, creating new features, etc.). Some of them, improved the model and others havent, nevertheless we kept them all with the detailed explanation of our observations and conclusions. the actions performed might be trigered by insights on the data visualizations section or by general knowledge on this field.
+
+During the analysis we will be calling the observations with prolonged absence (> 5 hours) as possitive or ones while those with short absences are called negative or zeros.
+
+------------------------------------
+
+# 1. Ground preparation
+
+## 1.1 Load libraries used during the analysis.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(e1071)     # Alternative for Skewness
+library(glmnet)    # Lasso
+library(caret)     # To enable Lasso training with CV.
+library(FSelector) # To compute Information Gain
+library(dplyr)
+library(stats)
+library(purrr)
+library(tidyr)
+library(questionr)
+library(doMC)
+library(maptree)
+library(corrplot)
+library(data.table)
+library(scales)
+```
+
+
+## 1.2 Load our data and set our working directory. Our data is sepparated into training data set and testing.
+```{r}
+rm(list = ls()) # Errase all variables from memory
+
+#path<- "/Users/estevezmelgarejoramon/Desktop/ML2/FirstAssignment/Absenteeism"
+#setwd(path)
+
+training <- read.csv(file = file.path("Absenteeism_at_work_classification_training.csv"),  header = TRUE, dec = ".", sep = ";")
+test <- read.csv(file = file.path("Absenteeism_at_work_classification_test.csv"),  header = TRUE, dec = ".", sep = ";")
+testId <- read.csv(file = file.path("Absenteeism_at_work_classification_test.csv"),  header = TRUE, dec = ".", sep = ";") %>% select_at("ID")
+set.seed(123)
+```
+
+
+1.2 Our functions
+
+## 1.3 Function Creation
+We have created a series of functions that compute the models we will be using in this assignment aswell as a function that will compare results among different well known models to define the most suitable one. Due to the size and composition of the dataset and the kind of analysis we need to do, we will test the following models:
+Linear Model
+Lasso
+Ridge
+Decission Tree
+XGBoost
+RandomForest
+
+```{r Useful Functions, message=FALSE, warning=FALSE}
+lm.model <- function(training_dataset) {
+  
+  # Create a training control configuration that applies a 5-fold cross validation
+  train_control_config <- trainControl(method = "repeatedcv", 
+                                       number = 5, 
+                                       repeats = 1,
+                                       returnResamp = "all",
+                                       verboseIter = F,
+                                       sampling = "up")
+  
+  # Fit a glm model to the input training data
+  set.seed(123)
+  this.model <- train(Absenteeism ~ .,
+                      data = training_dataset, #the dataset is what will change 
+                      method = "glm", 
+                      metric = "Accuracy",
+                      preProc = c("center", "scale"),
+                      trControl=train_control_config)
+  
+  return(this.model)
+}
+
+Glmnet.model <- function(training_dataset) {
+  trainControlLasso <- trainControl(method = "repeatedcv", 
+                                    number = 5, 
+                                    repeats = 1,
+                                    returnResamp = "all",
+                                    verboseIter = F,
+                                    sampling = "up")
+  
+  gridGlmnet<- expand.grid(alpha = seq(0, 1, by = 0.01), 
+                         lambda = seq(0.001, 0.05, by = 0.01)) 
+  
+  set.seed(123)  
+  this.model <- train(Absenteeism ~ ., data = training_dataset, 
+                           method = "glmnet", 
+                           metric = "Accuracy",
+                           preProc = c("center", "scale"),
+                           trControl = trainControlLasso,
+                           tuneGrid = gridGlmnet
+                           ) 
+  
+  
+  return(this.model)
+}
+
+Tree.model <-  function(training_dataset){
+  trainControlTree <- trainControl(method = "repeatedcv", 
+                                   number = 5, 
+                                   repeats = 1,
+                                   returnResamp = "all",
+                                   verboseIter = F,
+                                   sampling = "up")
+
+  
+  
+  set.seed(123)  
+  this.model <- train(Absenteeism ~ ., data = training_dataset, 
+                     method = "rpart", 
+                     metric = "Accuracy",
+                     preProc = c("center", "scale"),
+                     trControl = trainControlTree,
+                     tuneLength = 200 # for random search
+  ) 
+  return(this.model)
+}
+
+XGB.model <-  function(training_dataset){
+  
+  trainControlXGB <- trainControl(method = "repeatedcv", 
+                                  number = 5, 
+                                  repeats = 1,
+                                  returnResamp = "all",
+                                  verboseIter = F,
+                                  allowParallel = TRUE,
+                                  sampling = "up")
+                                  
+  registerDoMC(cores=4)
+  set.seed(123)  
+  this.model <- train(Absenteeism ~ ., data = training_dataset, 
+                    method = "xgbTree", 
+                    metric = "Accuracy",
+                    preProc = c("center", "scale"),
+                    trControl = trainControlXGB,
+                    tuneLength = 20, # for random search
+                    num.threads = 4
+                    ) 
+  
+  return(this.model)
+}
+
+RandomForest.model <-  function(training_dataset){
+  
+  trainControlRandomForest <- trainControl(method = "repeatedcv", 
+                                  number = 5, 
+                                  repeats = 1,
+                                  returnResamp = "all",
+                                  verboseIter = F,
+                                  allowParallel = T,
+                                  sampling = "up")
+                                  
+  
+  set.seed(123)  
+  registerDoMC(cores=4)
+  this.model <- train(Absenteeism ~ ., data = training_dataset, 
+                      method = "rf", 
+                      metric = "Accuracy",
+                      preProc = c("center", "scale"),
+                      trControl = trainControlRandomForest,
+                      tuneLength = 50, # for random search
+                      num.threads = 4
+  ) 
+  
+  return(this.model)
+}
+
+
+Model.compare <- function(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "None"){
+  ## This function compares the accuracy of lm.model, Glmnet.model, Tree.model and RandomForest.model
+  accuracies <- c(max(LmModel$results$Accuracy), max(GlmnetModel$results$Accuracy), 
+                  max(TreeModel$results$Accuracy), max(RandomForestModel$results$Accuracy))
+  
+  models <- c("Linear", "Glmnet", "Tree", "RandomForest")
+  treatment <- rep(TreatmentDescription, 4)
+  df <- data.frame(Model = models,
+                   Accuracy = accuracies,
+                   Treatment = treatment)
+  return(df)
+}
+```
+
+
+# 2. Recoding and variables type
+
+This is done for better understanding of the data and to improve the visualization on the graphs.
+
+Because we will do some recoding we first combine both dataset so that we only run the process once and avoid having differences on features between training and test dataset.
+
+```{r recoding}
+test$Absenteeism <- 0 # Test data has no target variable. 
+dataset <- rbind(training, test)
+
+dataset <- dataset[,!(names(dataset) %in% c("ID", "ID.Worker"))] # Removing ID variables. 
+
+# We will recode variable names so that they fit better in plots
+names(dataset) <- recode(names(dataset),
+                         "Transportation.expense" = "TranspExp",
+                         "Hit.target"  ="Hit",
+                         "Social.smoker"  = "Smoker",
+                         "Distance.from.Residence.to.Work" = "WorkDist",
+                         "Disciplinary.failure" = "DiscFailure",
+                         "Month.of.absence" = "MonthOfAbs",
+                         "ID.Worker" = "WorkerID",
+                         "Service.time" = "ServTime",
+                         "Day.of.the.week"   = "WeekDay",
+                         "Work.load.Average.day"  = "WorkLoadAvgDay",
+                         "Social.drinker"  = "Drinker",
+                         "Body.mass.index" = "BodyMassIndex",
+                         "Reason.for.absence"  = "Reason")
+
+
+
+dataset$Reason <- recode(dataset$Reason, 
+                         '0'='InfParasDis', '1'='Neoplasms', '2'='DisOfBblood', '3'='Endoc&metDis', '4'='MentAndBehavDisor',
+                         '5'='NervSys', '6'='EyeAndBdnexa', '7'='EarAndMast', '8'='CircSys', '9'='RespSys', '10'='DigSys', 
+                         '11'='SkinAndSaubcutTiss', '12'='MuscuAndConnect',  '13'='Genitourinary', '14'='PregnanBirthAndPuerp', 
+                         '15'='Perinatal', '16'='Congenital', '17'='AbnormalFindings', '18'='InjuryPoisoningAndOther',
+                         '19'='MorbidityAndMortality', '21'='FactorsinfluencingHealth', '22'='patientFollowUp',
+                         '23'='Consultation', '24'='BloodDonation', '25'='LabExamination', '26'='Unjustified',
+                         '27'='Physiotherapy', '28'='Dental')
+
+dataset$Seasons <- recode(dataset$Seasons,'1'='summer','2'='autumn','3'='winter','4'='spring')
+
+dataset$Education <- recode(dataset$Education, '1'='highschool','2'='graduate','3'='postgraduate','4'='masterAndPhD')
+
+dataset$WeekDay <- recode(dataset$WeekDay, '2'='Mon','3'='Tue','4'='Wed','5'='Thr', '6'='Fri')
+
+summary(dataset)
+```
+
+Check variable types (or factor or numeric). 
+ 
+We see that there are some columns that need to be converted to factors.
+booleans (0 or 1) are set as factors too.
+
+```{r  set categorical features as factor}
+# factor will convert the column to categorical. lapply applies the factor function to each of the columns in categorical_columns 
+categorical_columns <- c('Reason', 'MonthOfAbs', 'WeekDay', 'Seasons', 'DiscFailure', 'Drinker', 'Smoker', 'Absenteeism', 'Education')
+dataset[categorical_columns] <- lapply(dataset[categorical_columns], factor) 
+summary(dataset)
+str(dataset)
+```
+
+
+Lets check for duplicates in the training data and if there are, remove them to avoid overfitting.
+```{r check for duplicates}
+training <- dataset[1:593,]
+test <- dataset[594:740,]
+print("Number of rows duplicated :")
+nrow(training) - nrow(distinct(training))
+
+training <- distinct(training)
+```
+
+On previous analysis we infere that the data is complete. just to double check there are no missing values or NAs:
+
+```{r look for NAs}
+colSums(is.na(dataset))
+```
+
+
+## First Run of the Model
+We will compute our models without any feature ingenieerng and compare them later with any
+modification we do to our data. 
+
+```{r first run of the model}
+
+training <- dataset[1:593,]
+test <- dataset[594:740,]
+
+# Creating an empty df that will contain the comparisons of our models
+comparisonDF <- data.frame(Model = character(), Accuracy = numeric(), Treatment = character())
+
+# Fitting our models
+LmModel <- lm.model(training) 
+GlmnetModel <- Glmnet.model(training) 
+TreeModel <- Tree.model(training)
+RandomForestModel <- RandomForest.model(training)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "None"))
+comparisonDF
+
+```
+Glmnet is the model with highest Accuracy. Result is 0.853 with minimum feature engineering
+
+
+# 3. Data visualisation
+
+Before any feature ingeneering we will visualise our data so see if we can observe any interesing pattern.
+
+## 3.1 Continuous Variables
+Lets plot a histogram of all continious variables to see their distributions
+```{r histograms}
+training %>% 
+  keep(is.numeric) %>% 
+  gather() %>% 
+  ggplot(aes(value)) +
+  facet_wrap(~ key, scales = "free") +
+  geom_histogram()
+```
+
+
+Lets now create a "violin" plot of continious variables to compare the behaviour of positive and negative populations on our training set. If there is a feature with very similar distribution, we might consider removing it of the analysis.
+
+```{r Violin plots}
+# Violin plots
+DataForViolinPLot <- training %>% 
+                     keep(is.numeric) %>% 
+                     cbind(training$Absenteeism) %>%
+                     melt()
+names(DataForViolinPLot)[1] <- "Absenteeism"
+ggplot(DataForViolinPLot, aes(x = Absenteeism, y = value)) +
+  facet_wrap(~ variable, scales = "free") +
+  geom_violin()
+```
+
+In this plot we can see the distribution of continious variables for each target class. We would expect that good explanatory variables have different shapes
+having different distribution for each class. We can see that variables such as weight for axample have nearly the same shape therefore they 
+are not very promissing. Never the less we will compute some statistical analisys to proove our visual analisys later on. 
+
+Now we will check corretation among cont. variables
+```{r corelation}
+# feature
+
+correlation <- training %>% keep(is.numeric) %>% cor(method = "pearson")
+corrplot(correlation, type = 'full', method = 'circle')
+```
+
+We can see that weight and bodymass index are correlated, it makes sense as BMI = Kg/m^2. 
+other correlation we see is between Son and Pets with Travel distance: this also makes sence as bigger houses are in the suburbs.
+
+```{r corelation II}
+# Correlation between bodymass index and weight
+print("Bodymass Index - weight pearson correlation: ")
+correlation["BodyMassIndex", "Weight"]
+```
+
+Lets boxplot all continious variables. 
+```{r boxplot}
+# Box plot of numeric variables
+numVars<- dplyr::select_if(training, is.numeric)
+
+for (i in unique(names(numVars))){
+  dataForPlot <- numVars %>% select_at(i)
+  plot <- ggplot(dataForPlot, aes_string(y = i)) +  stat_boxplot()
+  show(plot)
+}
+
+
+```
+We can see that there are some outliers in our data but nothing very extreme. This issue will be treated down the road.
+
+
+## 3.2 Categorical Variables
+
+First we count the number of unique values (categories) per feature
+```{r unique values}
+sapply(dataset %>% keep(is.factor), function(x){length(unique(x))})  
+```
+Observations:
+- 13 months. this will need to be adressed later. See if its necesary to transform and evaluate the impact of leaving 3 values with month 0.
+- too many reasons for absence
+
+On the following graph we will compare the behaviour of categorical variables between false (0) and possitive (1) values.
+```{r categorical variables plot}
+# plot of categorical variables 
+
+FactorVars<- dplyr::select_if(training, is.factor)
+
+for (i in unique(names(FactorVars))[names(FactorVars) != "Absenteeism"]){
+  dataForPlot <- FactorVars %>% select_at(c(i, "Absenteeism"))
+  plot <- ggplot(dataForPlot, aes_string(i, "Absenteeism")) + geom_count() + coord_flip()
+  show(plot)
+}
+
+```
+
+First thing we see is that categories like "master and PHD" have little frequency, maybe it makes sense to group them an make only two calsses, highschool & University.
+
+Also its seems that there are too many reasons of absenteesm, and some of them with very little frequency. We could create a goup called "Others" to gather all low frec classes (less than 1%)
+
+There are some interesting patterns at least in drinkers, discFailure, seasson and weekday variables. 
+On the following barplots we can observe the behaviour:
+- although the number of observations per season is equally distributed, we observe a significant higher amount of positive values during Winter
+- although the number of observations per day of the week if similarly distributed, we observe a significant higher amount of positive values on Mondays and lower on Thursdays.
+- there is a very low amount of employees with disciplinary failures on the training set and none of the employees with disc.failures has an absenteeism of more than 5 hours.
+- diferent from smokers, 60% of the employees who drinks have extended leaves.
+
+
+```{r plot of categorical variables II}
+true_values <- training[training$Absenteeism == 1,]
+
+ggplot(data = true_values, aes(x=Seasons)) + geom_bar()
+ggplot(data = true_values, aes(x=WeekDay)) + geom_bar() + ggtitle("Monday, bloody Monday....")
+ggplot(data = true_values, aes(x=Drinker)) + geom_bar()
+ggplot(data = true_values, aes(x=DiscFailure)) + geom_bar()
+
+```
+
+
+Finally, lets focus on the frequencies of Reason for absenteesm and education
+```{r frequencies}
+reasonFreq <- freq(training$Reason, digits = 5, valid = F) %>% tibble::rownames_to_column("Reason") 
+EducatioFreq <- freq(training$Education, digits = 5, valid = F) %>% tibble::rownames_to_column("Education") 
+
+reasonFreq
+EducatioFreq
+
+ggplot(reasonFreq , aes(x = reorder(Reason, - `%`), y = `%`)) +    
+  geom_col() +
+  ylab("%") +
+  xlab("Reason") +
+  coord_flip()
+
+ggplot(EducatioFreq , aes(x = reorder(Education, - `%`), y = `%`)) +    
+  geom_col() +
+  ylab("%") +
+  xlab("Education") +
+  coord_flip()
+
+```
+
+
+# 4. Outliers
+As we saw in the boxPlot of continious variables, there are some outliers that might be affecting our results. Lets remove them:
+```{r}
+for (col in names(training)) {
+  if (is.numeric(training[[col]]) && col != "Absenteeism"){
+    to_remove <- boxplot.stats(training[[col]], coef = 4)$out
+    training_no_outliers <- training[!training[[col]] %in% to_remove, ]
+    print(col)
+    print(to_remove)
+    print(ggplot(training_no_outliers, aes_string(y=col))+ geom_boxplot(width=0.1))
+    
+  }
+}
+
+```
+As we can see, for a coeficient of 4, only number of pets = 8 and heigth = 196, 185 are considered as outliers. 
+In my opinion these values are not vey extreme, specially heigth = 196, 185. 
+Never the less we will test our models without outliers.
+
+```{r} 
+# Fitting our models without outliers
+
+LmModel <- lm.model(training_no_outliers) 
+GlmnetModel <- Glmnet.model(training_no_outliers) 
+TreeModel <- Tree.model(training_no_outliers)
+RandomForestModel <- RandomForest.model(training_no_outliers)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "RemovingOutliersCoef4"))
+comparisonDF
+
+rm(training_no_outliers)
+```
+
+It seems that removing them has no influence in acuracy.
+Considering our training set has less than 600 observations and there are not significant outliers that can be atributed to a mistake while loading the information we would not consider applying lower factors than 4.
+
+Considering the low improvement after removing the outliers, we will start the feature engineering with them and continue monitoring them.  
+
+
+# 5. Feature Engineering
+
+## 5.1 Bucketize some continuous features:
+```{r bucketizing son and pet}
+train_buckson <- training
+train_buckson$Son <-as.factor(ifelse(train_buckson$Son == 0, "No", "Yes"))
+
+```
+
+## Run the models with bucket of pets and sons
+
+```{r fitting the model with bucket of sons} 
+ 
+LmModel <- lm.model(train_buckson) 
+GlmnetModel <- Glmnet.model(train_buckson) 
+TreeModel <- Tree.model(train_buckson)
+RandomForestModel <- RandomForest.model(train_buckson)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "bucketizing Sons"))
+comparisonDF
+
+```
+
+We observe a slight improvement on Glmnet performance so we will keep the change.
+
+
+
+```{r}
+training$Son <-as.factor(ifelse(training$Son == 0, "No", "Yes"))
+```
+
+
+Lets now try with pets
+```{r} 
+train_buckpet <- training
+train_buckpet$Pet <-as.factor(ifelse(train_buckpet$Pet == 0, "No", "Yes"))
+  
+LmModel <- lm.model(train_buckpet) 
+GlmnetModel <- Glmnet.model(train_buckpet) 
+TreeModel <- Tree.model(train_buckpet)
+RandomForestModel <- RandomForest.model(train_buckpet)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "bucketizing Pets"))
+comparisonDF
+
+rm(train_buckpet)
+```
+
+No improvement here.. so we discard changes
+
+## 5.2 Let's group reasons with less or equal than 1% frequency
+```{r}
+# Let's remove reasons with less or equal than 1% frequency
+reasonsToGroup <- reasonFreq[reasonFreq$`%` <= 1, "Reason"]
+training_buckreasson <- training
+training_buckreasson$Reason <- as.character(training_buckreasson$Reason) # We have to convert to character and then back
+training_buckreasson[training_buckreasson$Reason %in% reasonsToGroup, "Reason"] <- "OTHERS"
+training_buckreasson$Reason <- as.factor(training_buckreasson$Reason)
+
+freq(training_buckreasson$Reason, digits = 5, valid = F)
+
+
+ReasonFrec <- freq(training_buckreasson$Reason, digits = 5, valid = F)
+ReasonFrec <- tibble::rownames_to_column(ReasonFrec, "Reason") # La funcion frec() deja Reasons como rownames, asi los hago una columna para el ggplot
+ReasonFrec
+
+ggplot(ReasonFrec , aes(x = reorder(Reason, - `%`), y = `%`)) +    
+  geom_col() +
+  ylab("%") +
+  xlab("Reason") +
+  coord_flip() + 
+  ggtitle("Reasons with 'OTHERS' goup")
+```
+
+
+
+```{r} 
+
+LmModel <- lm.model(training_buckreasson) 
+GlmnetModel <- Glmnet.model(training_buckreasson) 
+TreeModel <- Tree.model(training_buckreasson)
+RandomForestModel <- RandomForest.model(training_buckreasson)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "bucketizing Reassons"))
+comparisonDF
+
+rm(training_buckreasson)
+```
+
+We see an improvement of Random forest Mode, but out best model Glmnet, has decreased accuracy. We decide not to make the change.
+
+
+
+
+## 5.3 Groupby Education
+```{r}
+training_groupEd <- training
+training_groupEd$Higher_Education <- as.factor(recode(training_groupEd$Education, 'graduate'='Yes','postgraduate'='Yes','masterAndPhD'='Yes','highschool'='No'))
+training_groupEd[1:594,] %>% 
+  ggplot(aes(x = Higher_Education)) + geom_bar()
+```
+
+
+
+
+
+
+
+## fitting our model with grouping on education
+```{r} 
+# Fitting our models after grouping education
+
+LmModel <- lm.model(training_groupEd) 
+GlmnetModel <- Glmnet.model(training_groupEd) 
+TreeModel <- Tree.model(training_groupEd)
+RandomForestModel <- RandomForest.model(training_groupEd)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "bucketizing Education"))
+comparisonDF
+
+```
+
+
+The tendency is that all models improve si we keep the change and move on!
+
+```{r}
+training <- training_groupEd
+rm(training_groupEd)
+```
+
+
+## 5.4 New features
+```{r}
+# day next to weekend (Monday or Friday)
+training$MonOrFri <- as.factor(recode(training$WeekDay, '1' = 'Yes', '2' = 'No', '3' = 'No', '4'='No','5'='Yes','6'='Yes'))
+
+# avg. mile transportation cost 
+training$Transp_avg_cost <- as.numeric(training$TranspExp/training$WorkDist)
+
+# Log of distance to work
+training$log_dist <-log(training$WorkDist)
+
+```
+
+
+```{r} 
+# Fitting our models after new features
+
+LmModel <- lm.model(training) 
+GlmnetModel <- Glmnet.model(training) 
+TreeModel <- Tree.model(training)
+RandomForestModel <- RandomForest.model(training)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "New features"))
+comparisonDF
+
+```
+Not really improving!! what is next..
+
+```{r}
+# Removing them
+training$MonOrFri <- NULL
+training$Transp_avg_cost <- NULL
+training$log_dist <- NULL
+```
+
+
+## 5.5 More bucketing
+```{r}
+
+training_morebuck <- training
+training_morebuck$BodyMassIndex <-.bincode(training_morebuck$BodyMassIndex, c(18.5, 24.9, 29.99, 34.9, 39.99), TRUE, TRUE)
+
+training_morebuck$BodyMassIndex <- as.factor(recode(training_morebuck$BodyMassIndex, '1' = "Normal", '2' = "Overweight", '3' = "Obesity", '4' = "ExtremeObesity"))
+
+# Age & years of service
+training_morebuck$Age <-as.factor(.bincode(training_morebuck$Age, c(18, 30, 45, 60), TRUE, TRUE))
+
+```
+
+
+```{r} 
+# Fitting our models after new features
+
+LmModel <- lm.model(training_morebuck) 
+GlmnetModel <- Glmnet.model(training_morebuck) 
+TreeModel <- Tree.model(training_morebuck)
+RandomForestModel <- RandomForest.model(training_morebuck)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "More bucketising"))
+comparisonDF
+
+```
+Also not improving our best model 
+
+
+
+## 5.6 Remove variables
+
+Remove those features that are not significant considering the experience on this field and observations during section 3.
+- Month: we keep seasons
+- Disc.Failure: unbalanced
+- Education: replaced by high education
+- Weight and Height: info on BMI
+
+```{r}
+light_train <- training[,!(names(training) %in% c("MonthOfAbs", "DiscFailure", "Education", "Weight", "Height"))]
+```
+
+## run model with new combination of features
+```{r}
+
+LmModel <- lm.model(light_train) 
+GlmnetModel <- Glmnet.model(light_train) 
+TreeModel <- Tree.model(light_train)
+RandomForestModel <- RandomForest.model(light_train)
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "previous FE + removing features, no FSel"))
+comparisonDF
+
+```
+Well it seems that removing theese variables we actually gain some accuracy. Lets keep the change then.
+
+```{r}
+training <- light_train
+```
+
+
+# 6. Feature Importance  
+for this analysis we considered all the variables.
+
+## 6.1 CHI ^2
+```{r}
+
+training_raw <- dataset[1:593,]
+
+
+chisquared <- data.frame(chi.squared(Absenteeism~., training_raw[names(training_raw)]))
+chisquared$features <- rownames(chisquared)
+
+# Plot the result, and remove those below the 1st IQR (inter-quartile-range) --aggressive
+par(mfrow=c(1,2))
+boxplot(chisquared$attr_importance)
+bp.stats <- boxplot.stats(chisquared$attr_importance)$stats   # Get the statistics from the boxplot
+
+chisquared.threshold = bp.stats[2]  # This element represent the 1st quartile (more on: https://www.math.ucla.edu/~anderson/rw1001/library/base/html/boxplot.stats.html).
+text(y = bp.stats, labels = bp.stats, x = 1.3, cex=0.7)
+barplot(sort(chisquared$attr_importance), names.arg = chisquared[order(chisquared$attr_importance),]$features, cex.names = 0.6, las=2, horiz = T)
+abline(v=chisquared.threshold, col='red')  # Draw a red line over the 1st IQR
+dev.off()
+####### move red line to see if it improves the results
+
+# Determine what features to remove from the dataset.
+features_to_remove <- as.character(chisquared[chisquared$attr_importance <= chisquared.threshold, "features"])
+chi_squared_model = lm.model(training_raw[!names(training_raw) %in% features_to_remove])
+confusionMatrix(chi_squared_model, "none")
+
+LmModel <- lm.model(training_raw[!names(training_raw) %in% features_to_remove]) 
+GlmnetModel <- Glmnet.model(training_raw[!names(training_raw) %in% features_to_remove]) 
+TreeModel <- Tree.model(training_raw[!names(training_raw) %in% features_to_remove])
+RandomForestModel <- RandomForest.model(training_raw[!names(training_raw) %in% features_to_remove])
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "with chisquared FS"))
+comparisonDF
+```
+
+Good results fiting the model with the important variables of chisquared model
+Tried different options moving the threshold: not significant results. we set it again in zero.
+
+
+
+## 6.2 Information Gain Selection
+
+```{r}
+weights<- data.frame(information.gain(Absenteeism~., training_raw))
+weights$feature <- rownames(weights)
+weights[order(weights$attr_importance, decreasing = TRUE),]
+information_gain_features <- weights$feature[weights$attr_importance > 0.015]
+information_gain_features_to_remove <- weights$feature[weights$attr_importance < 0.015]
+training_gm <- training_raw[,!names(training_raw) %in% information_gain_features_to_remove]
+information_gain_model = lm.model(training_gm)
+confusionMatrix(information_gain_model, 'none')
+
+LmModel <- lm.model(training_raw[,!names(training_raw) %in% information_gain_features_to_remove]) 
+GlmnetModel <- Glmnet.model(training_raw[,!names(training_raw) %in% information_gain_features_to_remove]) 
+TreeModel <- Tree.model(training_raw[,!names(training_raw) %in% information_gain_features_to_remove])
+RandomForestModel <- RandomForest.model(training_raw[,!names(training_raw) %in% information_gain_features_to_remove])
+
+comparisonDF <- rbind(comparisonDF, Model.compare(LmModel, GlmnetModel, TreeModel, RandomForestModel, TreatmentDescription = "with InformationGain FS"))
+comparisonDF
+```
+Results with features selected by X`2 are better so we discard this selection.
+
+## 6.3 WRAPPER METHODS
+
+```{r}
+# train_control_config_4_stepwise <- trainControl(method = "none", classProbs = TRUE, verboseIter = TRUE, allowParallel = TRUE)
+# 
+# #To make strings or factors valid names in R
+# training_Wrapper <- sapply(training_raw, make.names)
+#  
+# registerDoMC(cores=4)
+# backward.lm.mod <- train(Absenteeism ~ ., data = training_Wrapper, 
+#                           method = "glmStepAIC", 
+#                           direction = "backward",
+#                           trace = FALSE,
+#                           metric = "Accuracy",
+#                           trControl=train_control_config_4_stepwise,
+#                           num.threads = 4
+#                           )
+#  
+#  
+# paste("Features Selected" ,backward.lm.mod$finalModel$formula[3])
+
+```
+
+backward lm model took very long time to run so we decided not to include it in our analysis.
+
+
+
+
+# 7. Final Results and Conclusions
+After testing a lot of different feature ingeneering techniques we come to the conclusion that our best predictor model is the Ridge one trained without variables excluded by Chisquared (threshold = 0) test and with no Feature ingeneering to our great regret..
+
+Results of all our trials can be seen here:
+## See the evolution of the results between models and fittings. 
+```{r}
+print("Our best bet:")
+comparisonDF[comparisonDF$Accuracy == max(comparisonDF$Accuracy), ]
+write.csv(comparisonDF, file = 'comparisonDF.csv', row.names = FALSE)
+```
+
+
+
+## Train the model and generate the file with the final predictions.
+```{r}
+# Train the model using all the data
+# This time we will create a bigger grid to fine tune our hyper parameters.
+# Also we will do 2 repetitions to reduce overfitting as much as we can. 
+finalTrain <- training_raw[!names(training_raw) %in% features_to_remove]
+finalTest <- test[!names(test) %in% features_to_remove]
+
+
+Glmnet.model.tunning <- function(training_dataset) {
+  trainControlLasso <- trainControl(method = "repeatedcv",
+                                    number = 5,
+                                    repeats = 2,
+                                    returnResamp = "all",
+                                    verboseIter = F,
+                                    sampling = "up")
+
+  gridGlmnet<- expand.grid(alpha = seq(0, 1, by = 0.01), 
+                         lambda = seq(0.001, 0.05, by = 0.01)) 
+
+  set.seed(123)
+  this.model <- train(Absenteeism ~ ., data = training_dataset,
+                           method = "glmnet",
+                           metric = "Accuracy",
+                           preProc = c("center", "scale"),
+                           trControl = trainControlLasso,
+                           tuneGrid = gridGlmnet
+                           )
+
+
+  return(this.model)
+}
+
+bestTuneModel <- Glmnet.model.tunning(finalTrain)
+
+print(bestTuneModel$bestTune)
+
+finalModel <- function(training_dataset) {
+  trainControlLasso <- trainControl(method = "none")
+
+  gridGlmnet<- expand.grid(alpha = 0, 
+                         lambda = 0.041) 
+
+  
+  this.model <- train(Absenteeism ~ ., data = training_dataset,
+                           method = "glmnet",
+                           metric = "Accuracy",
+                           preProc = c("center", "scale"),
+                           trControl = trainControlLasso,
+                           tuneGrid = gridGlmnet
+                           )
+
+
+  return(this.model)
+}
+
+
+
+final.model <- finalModel(finalTrain)
+
+
+
+# Predict the prices for the test data (i.e., we use the exp function to revert the log transformation that we applied to the target variable)
+final.pred <- predict(final.model, finalTest, type = "raw")
+
+predictions <- data.frame(ID = testId$ID, Absenteeism.time.in.hours= (final.pred))
+colnames(predictions) <-c("ID", "Absenteeism")
+write.csv(predictions, file = "predictions.csv", row.names = FALSE) 
+
+```
+
+## Considerations for the decision on the final model
+- Linear models are simple and we are not loosing a significant level of accuracy by using them. 
+- Boosts tend to overfit during the training.
+
+## Conlusions:
+This model is ready to predict 85% of the Absenteeism. 
+The most significant atribute is reason of absence as per ChiSquare analysis.
+
+
+## Moving forward
+- We will continue monitoring the model to see how is performing and if there are new trends to consider
+- We need to confirm if 36 employees is significant for our population (company). In case they are a low number of the total, we need to evaluate how the personal information as weight,height,age,smoker,drinker impacts our model.
+- On the upcoming we will also need to better understand some of the internal features delivered by the company: hit.target and work.load.avg.day
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
